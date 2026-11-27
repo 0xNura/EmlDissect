@@ -1,9 +1,6 @@
 # EmlDissect 🔍
 
-[![.NET](https://shields.io)](https://microsoft.com)
-[![Language](https://shields.io)](https://microsoft.com)
-[![Domain](https://shields.io)]()
-[![License: GPL v3](https://shields.io)](https://gnu.org)
+> 🟣 **.NET 8.0+** | 🟢 **C#** | 🔵 **DFIR / Blue Team** | ⚖️ **GNU GPLv3**
 
 
 ---
@@ -11,7 +8,7 @@
 ## 🇬🇧 English
 
 ### Overview
-**EmlDissect** is an open-source, lightweight command-line forensic and Threat Intelligence tool written in C# (.NET 8.0+) for SOC analysts and DFIR (Digital Forensics and Incident Response) practitioners. It safely dissects suspicious `.eml` files purely in memory—without writing or executing payloads on disk—to extract headers, authentication checks, neutralized (defanged) network IOCs, attachment hashes, file signature anomalies, and automated Threat Intel enrichment.
+**EmlDissect** is an open-source, lightweight command-line forensic and Threat Intelligence tool written in C# (.NET 8.0+) for SOC analysts and DFIR (Digital Forensics and Incident Response) practitioners. It safely dissects suspicious `.eml` files purely in memory without writing or executing payloads on disk to extract headers, authentication checks, neutralized (defanged) network IOCs, attachment hashes, file signature anomalies, and automated Threat Intel enrichment.
 
 ### Features
 
@@ -36,7 +33,7 @@
 ### Installation & Build
 ```bash
 # Clone the repository
-git clone https://github.com
+git clone https://github.com/0xNura/EmlDissect.git
 cd EmlDissect
 
 # Restore dependencies and build in Release mode
@@ -78,7 +75,7 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 * **Outlook:** Open the email → Click (`...`) → **Download** (or drag and drop the email onto your Desktop).
 
 #### 2. Option A: Using the Pre-compiled Release (Recommended for Windows)
-1. Download `EmlDissect-v2.0.0-win-x64.zip` from the [Releases](https://github.com) page and extract it.
+1. Download `EmlDissect-win-x64.zip` from the [Releases](https://github.com/0xNura/EmlDissect/releases) page and extract it.
 2. Double-click **`Start_CLI.bat`** to open a ready-to-use terminal in the tool's directory.
 3. Run `emldissect.exe` directly against any `.eml` file:
 
