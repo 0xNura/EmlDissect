@@ -84,17 +84,17 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 
 ```cmd
 # Test with the included phishing sample (Offline mode)
-emldissect.exe phishing_test.eml --no-intel
+emldissect.exe samples\phishing_test.eml --no-intel
 
 # Analyze a real email with IPinfo / Threat Intel enrichment
 emldissect.exe "C:\path\to\downloaded_email.eml"
 
 # Export full forensic report to JSON or CSV
-emldissect.exe phishing_test.eml --export-json report.json
-emldissect.exe phishing_test.eml --export-csv report.csv
+emldissect.exe samples\phishing_test.eml --export-json report.json
+emldissect.exe samples\phishing_test.eml --export-csv report.csv
 
 # Append findings directly to a Google Sheet
-emldissect.exe phishing_test.eml --export-gsheet <SPREADSHEET_ID>
+emldissect.exe samples\phishing_test.eml --export-gsheet <SPREADSHEET_ID>
 ```
 
 #### 3. Option B: Running from Source Code (Developers)
