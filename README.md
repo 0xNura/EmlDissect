@@ -31,8 +31,8 @@
 
 ## Prerequisites (Building from Source)
 
-- [.NET 8.0 SDK](https://microsoft.com) or higher.
-- [MimeKit](https://github.com) and [MailKit](https://github.com) `>= 4.15.1` (restored automatically via NuGet).
+- [.NET 8.0 SDK](https://dotnet.microsoft.com/en-us/download/dotnet) or higher.
+- [MimeKit](https://github.com/jstedfast/MimeKit) and [MailKit](https://github.com/jstedfast/mailkit) `>= 4.15.1` (restored automatically via NuGet).
 - *(Optional)* API keys for **IPinfo**, **VirusTotal**, **AbuseIPDB**, IMAP credentials, or a **Google Service Account** JSON key.
 
 ## Installation & Build
