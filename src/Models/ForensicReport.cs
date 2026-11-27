@@ -6,7 +6,7 @@ namespace EmlDissect.Models;
 public sealed class ForensicReport
 {
     public string ToolName { get; set; } = "EmlDissect";
-    public string ToolVersion { get; set; } = "2.0.0";
+    public string ToolVersion { get; set; } = "1.1.0";
     public DateTimeOffset AnalyzedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public string SourceFile { get; set; } = string.Empty;
     public string FileSha256 { get; set; } = string.Empty;

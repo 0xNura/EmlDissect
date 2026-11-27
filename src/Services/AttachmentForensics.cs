@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using EmlDissect.Models;
 using EmlDissect.Utils;
 using MimeKit;
@@ -6,11 +7,37 @@ using MimeKit;
 namespace EmlDissect.Services;
 
 /// <summary>
+/// Metadata for an attachment safely written to a quarantine directory.
+/// </summary>
+public sealed record QuarantinedAttachmentResult(
+    int PartIndex,
+    string OriginalFilename,
+    string QuarantinedPath,
+    long SizeBytes,
+    string Sha256
+);
+
+/// <summary>
 /// Analyzes email attachments strictly in memory: computes MD5, SHA-1, and SHA-256
-/// simultaneously and validates magic bytes against declared extensions.
+/// simultaneously, validates magic bytes against declared extensions, and supports
+/// explicit quarantined extraction by 1-based attachment index.
 /// </summary>
 public sealed class AttachmentForensics
 {
+    private static readonly HashSet<string> WindowsReservedNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
+
+    private sealed record AttachmentCandidate(
+        MimeEntity Entity,
+        string Filename,
+        string DeclaredMimeType,
+        bool IsEmbeddedMessage
+    );
+
     /// <summary>
     /// Recursively inspects all attachments in a MimeMessage without writing payloads to disk.
     /// </summary>
@@ -18,50 +45,205 @@ public sealed class AttachmentForensics
         MimeMessage message,
         CancellationToken cancellationToken = default)
     {
-        var results = new List<AttachmentInfo>();
+        var candidates = new List<AttachmentCandidate>();
         if (message.Body is not null)
         {
-            await WalkEntityAsync(message.Body, results, cancellationToken);
+            CollectAttachmentCandidates(message.Body, candidates);
+        }
+
+        var results = new List<AttachmentInfo>(candidates.Count);
+        foreach (AttachmentCandidate candidate in candidates)
+        {
+            byte[] bytes = await DecodeCandidateBytesAsync(candidate, cancellationToken);
+            results.Add(BuildAttachmentInfo(
+                candidate.Filename,
+                candidate.DeclaredMimeType,
+                bytes,
+                candidate.IsEmbeddedMessage));
         }
 
         return results;
     }
 
-    private async Task WalkEntityAsync(
+    /// <summary>
+    /// Extracts a single attachment by its 1-based index into <paramref name="outputDirectory"/>,
+    /// sanitizing the filename and appending ".quarantine" so it cannot be executed directly.
+    /// </summary>
+    public async Task<QuarantinedAttachmentResult> ExtractAttachmentToQuarantineAsync(
+        MimeMessage message,
+        int oneBasedPartIndex,
+        string outputDirectory,
+        CancellationToken cancellationToken = default)
+    {
+        if (oneBasedPartIndex < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(oneBasedPartIndex),
+                "Attachment index must be 1 or greater.");
+        }
+
+        var candidates = new List<AttachmentCandidate>();
+        if (message.Body is not null)
+        {
+            CollectAttachmentCandidates(message.Body, candidates);
+        }
+
+        if (candidates.Count == 0)
+        {
+            throw new InvalidOperationException("No attachments found in the target .eml file.");
+        }
+
+        if (oneBasedPartIndex > candidates.Count)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(oneBasedPartIndex),
+                $"Invalid attachment index #{oneBasedPartIndex}. Valid range is 1 to {candidates.Count}.");
+        }
+
+        AttachmentCandidate target = candidates[oneBasedPartIndex - 1];
+        byte[] payload = await DecodeCandidateBytesAsync(target, cancellationToken);
+        string sha256 = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+
+        string quarantineDir = Path.GetFullPath(outputDirectory);
+        Directory.CreateDirectory(quarantineDir);
+
+        string safeFilename = SanitizeAttachmentFilename(target.Filename, oneBasedPartIndex);
+        string quarantinedFilename = $"{safeFilename}.quarantine";
+        string destinationPath = Path.GetFullPath(Path.Combine(quarantineDir, quarantinedFilename));
+
+        string normalizedDirPrefix = quarantineDir.EndsWith(Path.DirectorySeparatorChar)
+            ? quarantineDir
+            : quarantineDir + Path.DirectorySeparatorChar;
+        StringComparison pathComparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
+        if (!destinationPath.StartsWith(normalizedDirPrefix, pathComparison))
+        {
+            throw new InvalidOperationException(
+                $"Quarantine path escaped target directory: '{destinationPath}'.");
+        }
+
+        await File.WriteAllBytesAsync(destinationPath, payload, cancellationToken);
+
+        return new QuarantinedAttachmentResult(
+            oneBasedPartIndex,
+            target.Filename,
+            destinationPath,
+            payload.LongLength,
+            sha256);
+    }
+
+    private static void CollectAttachmentCandidates(
         MimeEntity entity,
-        List<AttachmentInfo> results,
-        CancellationToken cancellationToken)
+        List<AttachmentCandidate> candidates)
     {
         switch (entity)
         {
             case Multipart multipart:
                 foreach (MimeEntity child in multipart)
                 {
-                    await WalkEntityAsync(child, results, cancellationToken);
+                    CollectAttachmentCandidates(child, candidates);
                 }
                 break;
 
             case MessagePart messagePart:
                 if (IsAttachmentEntity(messagePart))
                 {
-                    AttachmentInfo embeddedInfo = await InspectEmbeddedMessageAsync(messagePart, cancellationToken);
-                    results.Add(embeddedInfo);
+                    string filename = messagePart.ContentDisposition?.FileName
+                        ?? messagePart.ContentType?.Name
+                        ?? "embedded_message.eml";
+                    string mimeType = messagePart.ContentType?.MimeType ?? "message/rfc822";
+                    candidates.Add(new AttachmentCandidate(messagePart, filename, mimeType, IsEmbeddedMessage: true));
                 }
 
                 if (messagePart.Message?.Body is not null)
                 {
-                    await WalkEntityAsync(messagePart.Message.Body, results, cancellationToken);
+                    CollectAttachmentCandidates(messagePart.Message.Body, candidates);
                 }
                 break;
 
             case MimePart part:
                 if (IsAttachmentEntity(part))
                 {
-                    AttachmentInfo partInfo = await InspectMimePartAsync(part, cancellationToken);
-                    results.Add(partInfo);
+                    string filename = part.FileName
+                        ?? part.ContentType?.Name
+                        ?? "unnamed_attachment.bin";
+                    string mimeType = part.ContentType?.MimeType ?? "application/octet-stream";
+                    candidates.Add(new AttachmentCandidate(part, filename, mimeType, IsEmbeddedMessage: false));
                 }
                 break;
         }
+    }
+
+    private static async Task<byte[]> DecodeCandidateBytesAsync(
+        AttachmentCandidate candidate,
+        CancellationToken cancellationToken)
+    {
+        using var memoryStream = new MemoryStream();
+        if (candidate.Entity is MessagePart messagePart)
+        {
+            if (messagePart.Message is not null)
+            {
+                await messagePart.Message.WriteToAsync(memoryStream, cancellationToken);
+            }
+        }
+        else if (candidate.Entity is MimePart part && part.Content is not null)
+        {
+            await part.Content.DecodeToAsync(memoryStream, cancellationToken);
+        }
+
+        return memoryStream.ToArray();
+    }
+
+    private static string SanitizeAttachmentFilename(string rawFilename, int partIndex)
+    {
+        string fallback = $"attachment_part_{partIndex}.bin";
+        if (string.IsNullOrWhiteSpace(rawFilename))
+        {
+            return fallback;
+        }
+
+        // Normalize both Windows and POSIX separators before extracting the leaf name to defeat traversal.
+        string[] segments = rawFilename.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
+        string leaf = segments.Length > 0 ? segments[^1] : string.Empty;
+
+        char[] invalidChars = Path.GetInvalidFileNameChars();
+        var sb = new StringBuilder(leaf.Length);
+        foreach (char ch in leaf)
+        {
+            if (char.IsControl(ch) || Array.IndexOf(invalidChars, ch) >= 0)
+            {
+                sb.Append('_');
+            }
+            else
+            {
+                sb.Append(ch);
+            }
+        }
+
+        string cleaned = sb.ToString().Replace("..", "_", StringComparison.Ordinal).Trim(' ', '.');
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            return fallback;
+        }
+
+        string stem = Path.GetFileNameWithoutExtension(cleaned);
+        if (WindowsReservedNames.Contains(stem))
+        {
+            cleaned = "_" + cleaned;
+        }
+
+        const int maxFilenameLength = 180;
+        if (cleaned.Length > maxFilenameLength)
+        {
+            string ext = Path.GetExtension(cleaned);
+            int maxStemLen = Math.Max(16, maxFilenameLength - ext.Length);
+            string baseName = Path.GetFileNameWithoutExtension(cleaned);
+            cleaned = (baseName.Length > maxStemLen ? baseName[..maxStemLen] : baseName) + ext;
+        }
+
+        return cleaned;
     }
 
     private static bool IsAttachmentEntity(MimeEntity entity)
@@ -82,44 +264,6 @@ public sealed class AttachmentForensics
         }
 
         return false;
-    }
-
-    private static async Task<AttachmentInfo> InspectMimePartAsync(
-        MimePart part,
-        CancellationToken cancellationToken)
-    {
-        string filename = part.FileName
-            ?? part.ContentType?.Name
-            ?? "unnamed_attachment.bin";
-        string mimeType = part.ContentType?.MimeType ?? "application/octet-stream";
-
-        using var memoryStream = new MemoryStream();
-        if (part.Content is not null)
-        {
-            await part.Content.DecodeToAsync(memoryStream, cancellationToken);
-        }
-
-        byte[] bytes = memoryStream.ToArray();
-        return BuildAttachmentInfo(filename, mimeType, bytes, isEmbeddedMessage: false);
-    }
-
-    private static async Task<AttachmentInfo> InspectEmbeddedMessageAsync(
-        MessagePart messagePart,
-        CancellationToken cancellationToken)
-    {
-        string filename = messagePart.ContentDisposition?.FileName
-            ?? messagePart.ContentType?.Name
-            ?? "embedded_message.eml";
-        string mimeType = messagePart.ContentType?.MimeType ?? "message/rfc822";
-
-        using var memoryStream = new MemoryStream();
-        if (messagePart.Message is not null)
-        {
-            await messagePart.Message.WriteToAsync(memoryStream, cancellationToken);
-        }
-
-        byte[] bytes = memoryStream.ToArray();
-        return BuildAttachmentInfo(filename, mimeType, bytes, isEmbeddedMessage: true);
     }
 
     private static AttachmentInfo BuildAttachmentInfo(

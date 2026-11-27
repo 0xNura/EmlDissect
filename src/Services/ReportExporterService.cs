@@ -69,20 +69,47 @@ public sealed class ReportExporterService
     }
 
     /// <summary>
+    /// Exports a batch of ForensicReport objects as an indented JSON array.
+    /// </summary>
+    public async Task ExportJsonAsync(
+        IReadOnlyList<ForensicReport> reports,
+        string outputPath,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureParentDirectory(outputPath);
+        string json = JsonSerializer.Serialize(reports, JsonOptions);
+        await File.WriteAllTextAsync(outputPath, json, Encoding.UTF8, cancellationToken);
+    }
+
+    /// <summary>
     /// Exports a flattened summary row suitable for Excel or SIEM ingestion.
     /// </summary>
-    public async Task ExportCsvAsync(
+    public Task ExportCsvAsync(
         ForensicReport report,
+        string outputPath,
+        CancellationToken cancellationToken = default)
+    {
+        return ExportCsvAsync(new[] { report }, outputPath, cancellationToken);
+    }
+
+    /// <summary>
+    /// Exports a batch of flattened summary rows (one row per email) as CSV.
+    /// </summary>
+    public async Task ExportCsvAsync(
+        IReadOnlyList<ForensicReport> reports,
         string outputPath,
         CancellationToken cancellationToken = default)
     {
         EnsureParentDirectory(outputPath);
 
-        string[] values = BuildFlatSummaryRow(report).Select(v => v?.ToString() ?? string.Empty).ToArray();
-
         var sb = new StringBuilder();
         sb.AppendLine(string.Join(",", FlatColumns.Select(EscapeCsvField)));
-        sb.AppendLine(string.Join(",", values.Select(EscapeCsvField)));
+
+        foreach (ForensicReport report in reports)
+        {
+            string[] values = BuildFlatSummaryRow(report).Select(v => v?.ToString() ?? string.Empty).ToArray();
+            sb.AppendLine(string.Join(",", values.Select(EscapeCsvField)));
+        }
 
         await File.WriteAllTextAsync(outputPath, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true), cancellationToken);
     }
@@ -91,13 +118,32 @@ public sealed class ReportExporterService
     /// Appends the flattened forensic analysis row to a Google Sheet using either
     /// Google Sheets API v4 (GOOGLE_APPLICATION_CREDENTIALS) or a Webhook URL (GSHEET_WEBHOOK_URL).
     /// </summary>
-    public async Task<string> ExportGoogleSheetAsync(
+    public Task<string> ExportGoogleSheetAsync(
         ForensicReport report,
         string spreadsheetId,
         string? sheetRange = null,
         string? webhookUrl = null,
         CancellationToken cancellationToken = default)
     {
+        return ExportGoogleSheetAsync(new[] { report }, spreadsheetId, sheetRange, webhookUrl, cancellationToken);
+    }
+
+    /// <summary>
+    /// Appends one flattened row per analyzed email to a Google Sheet using either
+    /// Google Sheets API v4 (GOOGLE_APPLICATION_CREDENTIALS) or a Webhook URL (GSHEET_WEBHOOK_URL).
+    /// </summary>
+    public async Task<string> ExportGoogleSheetAsync(
+        IReadOnlyList<ForensicReport> reports,
+        string spreadsheetId,
+        string? sheetRange = null,
+        string? webhookUrl = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (reports.Count == 0)
+        {
+            return "No forensic reports to export.";
+        }
+
         string targetRange = string.IsNullOrWhiteSpace(sheetRange) ? "Sheet1!A:T" : sheetRange.Trim();
         string? effectiveWebhook = !string.IsNullOrWhiteSpace(webhookUrl)
             ? webhookUrl.Trim()
@@ -109,8 +155,12 @@ public sealed class ReportExporterService
         if (!string.IsNullOrWhiteSpace(webhookUrl) ||
             (string.IsNullOrWhiteSpace(credentialsPath) && !string.IsNullOrWhiteSpace(effectiveWebhook)))
         {
-            await SendToWebhookAsync(report, spreadsheetId, targetRange, effectiveWebhook!, cancellationToken);
-            return $"Appended forensic summary via Webhook ({effectiveWebhook})";
+            foreach (ForensicReport report in reports)
+            {
+                await SendToWebhookAsync(report, spreadsheetId, targetRange, effectiveWebhook!, cancellationToken);
+            }
+
+            return $"Appended {reports.Count} forensic summary row(s) via Webhook ({effectiveWebhook})";
         }
 
         if (string.IsNullOrWhiteSpace(credentialsPath))
@@ -140,10 +190,9 @@ public sealed class ReportExporterService
             ApplicationName = "EmlDissect"
         });
 
-        IList<object> rowValues = BuildFlatSummaryRow(report);
         var valueRange = new ValueRange
         {
-            Values = new List<IList<object>> { rowValues }
+            Values = reports.Select(BuildFlatSummaryRow).ToList()
         };
 
         SpreadsheetsResource.ValuesResource.AppendRequest appendRequest =
@@ -153,7 +202,7 @@ public sealed class ReportExporterService
 
         AppendValuesResponse response = await appendRequest.ExecuteAsync(cancellationToken);
         string updatedRange = response.Updates?.UpdatedRange ?? targetRange;
-        return $"Appended 1 row to Google Sheet '{spreadsheetId}' ({updatedRange})";
+        return $"Appended {reports.Count} row(s) to Google Sheet '{spreadsheetId}' ({updatedRange})";
     }
 
     private async Task SendToWebhookAsync(

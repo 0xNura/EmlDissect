@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using EmlDissect.Models;
 using EmlDissect.Services;
@@ -6,15 +7,28 @@ using EmlDissect.Utils;
 namespace EmlDissect;
 
 /// <summary>
-// CLI entry point and argument parsing
+/// CLI entry point and argument parsing.
 /// </summary>
 public static class Program
 {
-    private const string ToolVersion = "2.0.0";
+    private const string ToolVersion = "1.1.0";
 
     private sealed class CliOptions
     {
         public string? EmlFilePath { get; set; }
+        public string? DirPath { get; set; }
+        public string? FetchImapDir { get; set; }
+        public string ImapFolder { get; set; } = "INBOX";
+        public bool ImapFolderExplicit { get; set; }
+        public string? ImapFrom { get; set; }
+        public string? ImapSubject { get; set; }
+        public DateOnly? ImapSince { get; set; }
+        public bool ImapUnseen { get; set; }
+        public int ImapLimit { get; set; } = 50;
+        public bool ImapLimitExplicit { get; set; }
+        public bool AnalyzeAfterFetch { get; set; }
+        public int? DumpPartIndex { get; set; }
+        public string? DumpDir { get; set; }
         public bool NoIntel { get; set; }
         public bool IncludePrivateIps { get; set; }
         public string? ExportJsonPath { get; set; }
@@ -24,6 +38,47 @@ public static class Program
         public string? GSheetWebhookUrl { get; set; }
         public bool ShowHelp { get; set; }
         public bool ShowVersion { get; set; }
+    }
+
+    private sealed class IntelServicesContext : IDisposable
+    {
+        public HttpClient HttpClient { get; }
+        public IpInfoService IpInfoService { get; }
+        public ThreatIntelService ThreatIntelService { get; }
+
+        public IntelServicesContext()
+        {
+            HttpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+            HttpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"EmlDissect/{ToolVersion}");
+            IpInfoService = new IpInfoService(HttpClient);
+            ThreatIntelService = new ThreatIntelService(HttpClient);
+        }
+
+        public List<string> GetMissingCredentialNotices()
+        {
+            var notices = new List<string>();
+            if (!IpInfoService.HasToken)
+            {
+                notices.Add("IPINFO_TOKEN not set: using unauthenticated ipinfo.io tier (rate-limited).");
+            }
+
+            if (!ThreatIntelService.HasVirusTotalKey)
+            {
+                notices.Add("VT_API_KEY not set: skipping VirusTotal v3 hash and URL lookups.");
+            }
+
+            if (!ThreatIntelService.HasAbuseIpDbKey)
+            {
+                notices.Add("ABUSEIPDB_API_KEY not set: skipping AbuseIPDB v2 IP reputation lookups.");
+            }
+
+            return notices;
+        }
+
+        public void Dispose()
+        {
+            HttpClient.Dispose();
+        }
     }
 
     public static async Task<int> Main(string[] args)
@@ -44,23 +99,16 @@ public static class Program
             return 0;
         }
 
-        if (options.ShowHelp || string.IsNullOrWhiteSpace(options.EmlFilePath))
+        bool hasTargetMode = !string.IsNullOrWhiteSpace(options.EmlFilePath) ||
+                             !string.IsNullOrWhiteSpace(options.DirPath) ||
+                             !string.IsNullOrWhiteSpace(options.FetchImapDir);
+
+        if (options.ShowHelp || !hasTargetMode)
         {
-            PrintBanner();
+            PrintHeader();
             PrintUsage();
             return options.ShowHelp ? 0 : 1;
         }
-
-        string emlPath = Path.GetFullPath(options.EmlFilePath);
-        if (!File.Exists(emlPath))
-        {
-            WriteColoredLine($"[ERROR] Input .eml file not found: {emlPath}", ConsoleColor.Red);
-            return 1;
-        }
-
-        PrintBanner();
-        WriteColoredLine($"[*] Target File : {emlPath}", ConsoleColor.Cyan);
-        WriteColoredLine($"[*] Intel Mode  : {(options.NoIntel ? "OFFLINE (--no-intel)" : "ONLINE (IPinfo / VirusTotal / AbuseIPDB)")}", ConsoleColor.Cyan);
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -71,51 +119,17 @@ public static class Program
 
         try
         {
-            byte[] rawEmlBytes = await File.ReadAllBytesAsync(emlPath, cts.Token);
-            string fileSha256 = Convert.ToHexString(SHA256.HashData(rawEmlBytes)).ToLowerInvariant();
-
-            // 1. Parse headers, routing hops, authentication, and HTML links in memory
-            var emailParser = new EmailParserService();
-            using var emlStream = new MemoryStream(rawEmlBytes, writable: false);
-            ParsedEmailContext parsed = await emailParser.ParseAsync(emlStream, cts.Token);
-
-            // 2. Extract and defang network IOCs
-            var iocExtractor = new IocExtractorService();
-            NetworkIocCollection networkIocs = iocExtractor.Extract(parsed, options.IncludePrivateIps);
-
-            // 3. Analyze attachments strictly in memory
-            var attachmentForensics = new AttachmentForensics();
-            List<AttachmentInfo> attachments = await attachmentForensics.AnalyzeAttachmentsAsync(parsed.Message, cts.Token);
-
-            var report = new ForensicReport
+            if (!string.IsNullOrWhiteSpace(options.FetchImapDir))
             {
-                ToolVersion = ToolVersion,
-                AnalyzedAtUtc = DateTimeOffset.UtcNow,
-                SourceFile = emlPath,
-                FileSha256 = fileSha256,
-                FileSizeBytes = rawEmlBytes.LongLength,
-                OfflineMode = options.NoIntel,
-                Headers = parsed.HeaderInfo,
-                NetworkIocs = networkIocs,
-                Attachments = attachments
-            };
-
-            // 4. Online Threat Intelligence Enrichment
-            List<string> intelNotices = new();
-            if (!options.NoIntel)
-            {
-                intelNotices = await EnrichWithThreatIntelAsync(report, cts.Token);
+                return await RunImapFetchAsync(options, cts.Token);
             }
 
-            // 5. Aggregate Security Warnings
-            BuildSecurityWarnings(report);
+            if (!string.IsNullOrWhiteSpace(options.DirPath))
+            {
+                return await RunBatchDirectoryAnalysisAsync(options.DirPath, options, cts.Token);
+            }
 
-            // 6. Render ASCII/Color Terminal Report
-            RenderReport(report, intelNotices);
-
-            // 7. Export Reports
-            int exportExitCode = await RunExportsAsync(report, options, cts.Token);
-            return exportExitCode;
+            return await RunSingleFileAnalysisAsync(options.EmlFilePath!, options, cts.Token);
         }
         catch (OperationCanceledException)
         {
@@ -124,68 +138,293 @@ public static class Program
         }
         catch (Exception ex)
         {
-            WriteColoredLine($"\n[ERROR] Analysis failed: {ex.Message}", ConsoleColor.Red);
+            WriteColoredLine($"\n[ERROR] {ex.Message}", ConsoleColor.Red);
             return 1;
         }
     }
 
-    private static async Task<List<string>> EnrichWithThreatIntelAsync(
-        ForensicReport report,
+    private static async Task<int> RunSingleFileAnalysisAsync(
+        string inputPath,
+        CliOptions options,
         CancellationToken cancellationToken)
     {
-        var notices = new List<string>();
-        using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"EmlDissect/{ToolVersion}");
-
-        var ipInfoService = new IpInfoService(httpClient);
-        var threatIntelService = new ThreatIntelService(httpClient);
-
-        if (!ipInfoService.HasToken)
+        string emlPath = Path.GetFullPath(inputPath);
+        if (!File.Exists(emlPath))
         {
-            notices.Add("IPINFO_TOKEN not set: using unauthenticated ipinfo.io tier (rate-limited).");
+            WriteColoredLine($"[ERROR] Input .eml file not found: {emlPath}", ConsoleColor.Red);
+            return 1;
         }
 
-        if (!threatIntelService.HasVirusTotalKey)
+        PrintHeader();
+        WriteColoredLine($"[*] Target File : {emlPath}", ConsoleColor.Cyan);
+        WriteColoredLine($"[*] Intel Mode  : {(options.NoIntel ? "OFFLINE (--no-intel)" : "ONLINE (IPinfo / VirusTotal / AbuseIPDB)")}", ConsoleColor.Cyan);
+
+        var attachmentForensics = new AttachmentForensics();
+        (ForensicReport report, ParsedEmailContext parsed) = await AnalyzeFileCoreAsync(
+            emlPath,
+            options,
+            attachmentForensics,
+            cancellationToken);
+
+        List<string> intelNotices = new();
+        if (!options.NoIntel)
         {
-            notices.Add("VT_API_KEY not set: skipping VirusTotal v3 hash and URL lookups.");
+            using var intel = new IntelServicesContext();
+            intelNotices = intel.GetMissingCredentialNotices();
+            await EnrichWithThreatIntelAsync(report, intel, verboseProgress: true, cancellationToken);
         }
 
-        if (!threatIntelService.HasAbuseIpDbKey)
+        BuildSecurityWarnings(report);
+        RenderReport(report, intelNotices);
+
+        int exitCode = 0;
+
+        if (options.DumpPartIndex.HasValue)
         {
-            notices.Add("ABUSEIPDB_API_KEY not set: skipping AbuseIPDB v2 IP reputation lookups.");
+            string dumpDir = options.DumpDir ?? "./quarantine";
+            PrintSectionHeader("QUARANTINE EXTRACTION");
+            try
+            {
+                QuarantinedAttachmentResult dumped = await attachmentForensics.ExtractAttachmentToQuarantineAsync(
+                    parsed.Message,
+                    options.DumpPartIndex.Value,
+                    dumpDir,
+                    cancellationToken);
+
+                PrintKvTable(new (string Key, string Value, ConsoleColor? Color)[]
+                {
+                    ("Part Index", $"Attachment #{dumped.PartIndex}", ConsoleColor.Cyan),
+                    ("Original Name", dumped.OriginalFilename, ConsoleColor.White),
+                    ("Size", $"{dumped.SizeBytes:N0} bytes", ConsoleColor.Gray),
+                    ("SHA-256", dumped.Sha256, ConsoleColor.White),
+                    ("Quarantine Path", dumped.QuarantinedPath, ConsoleColor.Green)
+                });
+                WriteColoredLine($"  [+] Extracted to: {dumped.QuarantinedPath}", ConsoleColor.Green);
+                WriteColoredLine($"  [+] SHA-256     : {dumped.Sha256}", ConsoleColor.Green);
+                Console.WriteLine();
+            }
+            catch (Exception ex)
+            {
+                WriteColoredLine($"  [ERROR] Quarantine extraction failed: {ex.Message}", ConsoleColor.Red);
+                Console.WriteLine();
+                exitCode = 1;
+            }
         }
 
-        // Enrich public IPv4s (IPinfo + AbuseIPDB)
+        int exportExitCode = await RunExportsAsync(new[] { report }, isBatch: false, options, cancellationToken);
+        return exitCode != 0 ? exitCode : exportExitCode;
+    }
+
+    private static async Task<int> RunBatchDirectoryAnalysisAsync(
+        string targetDir,
+        CliOptions options,
+        CancellationToken cancellationToken)
+    {
+        string fullDir = Path.GetFullPath(targetDir);
+        if (!Directory.Exists(fullDir))
+        {
+            WriteColoredLine($"[ERROR] Target directory not found: {fullDir}", ConsoleColor.Red);
+            return 1;
+        }
+
+        List<string> emlFiles = Directory
+            .EnumerateFiles(fullDir, "*.eml", SearchOption.AllDirectories)
+            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        PrintHeader();
+        WriteColoredLine($"[*] Target Dir  : {fullDir}", ConsoleColor.Cyan);
+        WriteColoredLine($"[*] EML Files   : {emlFiles.Count} discovered", ConsoleColor.Cyan);
+        WriteColoredLine($"[*] Intel Mode  : {(options.NoIntel ? "OFFLINE (--no-intel)" : "ONLINE (IPinfo / VirusTotal / AbuseIPDB)")}", ConsoleColor.Cyan);
+
+        if (emlFiles.Count == 0)
+        {
+            WriteColoredLine($"[i] No .eml files found in '{fullDir}'.", ConsoleColor.Yellow);
+            return 0;
+        }
+
+        using IntelServicesContext? intel = options.NoIntel ? null : new IntelServicesContext();
+        if (intel is not null)
+        {
+            List<string> notices = intel.GetMissingCredentialNotices();
+            foreach (string notice in notices)
+            {
+                WriteColoredLine($"[i] {notice}", ConsoleColor.DarkYellow);
+            }
+        }
+
+        Console.WriteLine();
+        var attachmentForensics = new AttachmentForensics();
+        var reports = new List<ForensicReport>(emlFiles.Count);
+        var failures = new List<(string FilePath, string Error)>();
+
+        for (int i = 0; i < emlFiles.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string emlPath = emlFiles[i];
+            string displayPath = Path.GetRelativePath(fullDir, emlPath);
+
+            try
+            {
+                (ForensicReport report, _) = await AnalyzeFileCoreAsync(
+                    emlPath,
+                    options,
+                    attachmentForensics,
+                    cancellationToken);
+
+                if (intel is not null)
+                {
+                    await EnrichWithThreatIntelAsync(report, intel, verboseProgress: false, cancellationToken);
+                }
+
+                BuildSecurityWarnings(report);
+                reports.Add(report);
+
+                PrintBatchFileSummary(i + 1, emlFiles.Count, displayPath, report);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                failures.Add((displayPath, ex.Message));
+                WriteColoredLine($"[{i + 1}/{emlFiles.Count}] {displayPath} -> ERROR: {ex.Message}", ConsoleColor.Red);
+            }
+        }
+
+        RenderBatchSummaryTable(fullDir, reports, failures);
+
+        int exportExitCode = 0;
+        if (reports.Count > 0)
+        {
+            exportExitCode = await RunExportsAsync(reports, isBatch: true, options, cancellationToken);
+        }
+
+        return exportExitCode != 0 || failures.Count > 0 ? 1 : 0;
+    }
+
+    private static async Task<int> RunImapFetchAsync(
+        CliOptions options,
+        CancellationToken cancellationToken)
+    {
+        string outputDir = Path.GetFullPath(options.FetchImapDir!);
+
+        PrintHeader();
+        WriteColoredLine($"[*] IMAP Folder : {options.ImapFolder}", ConsoleColor.Cyan);
+        WriteColoredLine($"[*] Output Dir  : {outputDir}", ConsoleColor.Cyan);
+        WriteColoredLine($"[*] Fetch Limit : {options.ImapLimit}", ConsoleColor.Cyan);
+
+        var fetchOptions = new ImapFetchOptions
+        {
+            OutputDirectory = outputDir,
+            FolderName = options.ImapFolder,
+            FromFilter = options.ImapFrom,
+            SubjectFilter = options.ImapSubject,
+            SinceDate = options.ImapSince,
+            UnseenOnly = options.ImapUnseen,
+            Limit = options.ImapLimit
+        };
+
+        var fetcher = new ImapFetcherService();
+        ImapFetchResult result = await fetcher.FetchAsync(
+            fetchOptions,
+            msg => WriteColoredLine($"[*] {msg}", ConsoleColor.Gray),
+            cancellationToken);
+
+        PrintSectionHeader("IMAP ACQUISITION SUMMARY");
+        PrintKvTable(new (string Key, string Value, ConsoleColor? Color)[]
+        {
+            ("IMAP Server", $"{result.Host}:{result.Port}", ConsoleColor.White),
+            ("Folder", result.FolderName, ConsoleColor.White),
+            ("Matched", result.TotalMatched.ToString(CultureInfo.InvariantCulture), ConsoleColor.Cyan),
+            ("Downloaded", result.DownloadedFiles.Count.ToString(CultureInfo.InvariantCulture), ConsoleColor.Green),
+            ("Output Dir", outputDir, ConsoleColor.White)
+        });
+        Console.WriteLine();
+
+        if (options.AnalyzeAfterFetch)
+        {
+            return await RunBatchDirectoryAnalysisAsync(outputDir, options, cancellationToken);
+        }
+
+        return 0;
+    }
+
+    private static async Task<(ForensicReport Report, ParsedEmailContext Parsed)> AnalyzeFileCoreAsync(
+        string emlPath,
+        CliOptions options,
+        AttachmentForensics attachmentForensics,
+        CancellationToken cancellationToken)
+    {
+        byte[] rawEmlBytes = await File.ReadAllBytesAsync(emlPath, cancellationToken);
+        string fileSha256 = Convert.ToHexString(SHA256.HashData(rawEmlBytes)).ToLowerInvariant();
+
+        // 1. Parse headers, routing hops, authentication, and HTML links in memory
+        var emailParser = new EmailParserService();
+        using var emlStream = new MemoryStream(rawEmlBytes, writable: false);
+        ParsedEmailContext parsed = await emailParser.ParseAsync(emlStream, cancellationToken);
+
+        // 2. Extract and defang network IOCs
+        var iocExtractor = new IocExtractorService();
+        NetworkIocCollection networkIocs = iocExtractor.Extract(parsed, options.IncludePrivateIps);
+
+        // 3. Analyze attachments strictly in memory
+        List<AttachmentInfo> attachments = await attachmentForensics.AnalyzeAttachmentsAsync(parsed.Message, cancellationToken);
+
+        var report = new ForensicReport
+        {
+            ToolVersion = ToolVersion,
+            AnalyzedAtUtc = DateTimeOffset.UtcNow,
+            SourceFile = emlPath,
+            FileSha256 = fileSha256,
+            FileSizeBytes = rawEmlBytes.LongLength,
+            OfflineMode = options.NoIntel,
+            Headers = parsed.HeaderInfo,
+            NetworkIocs = networkIocs,
+            Attachments = attachments
+        };
+
+        return (report, parsed);
+    }
+
+    private static async Task EnrichWithThreatIntelAsync(
+        ForensicReport report,
+        IntelServicesContext intel,
+        bool verboseProgress,
+        CancellationToken cancellationToken)
+    {
         List<ExtractedIp> publicIps = report.NetworkIocs.IpAddresses
             .Where(ip => !ip.IsPrivateOrReserved)
             .ToList();
 
-        if (publicIps.Count > 0)
+        if (verboseProgress && publicIps.Count > 0)
         {
             WriteColoredLine($"[*] Enriching {publicIps.Count} public IPv4 indicator(s)...", ConsoleColor.DarkCyan);
         }
 
         foreach (ExtractedIp ip in publicIps)
         {
-            ip.IpInfo = await ipInfoService.LookupAsync(ip.RawIp, cancellationToken);
-            if (threatIntelService.HasAbuseIpDbKey)
+            ip.IpInfo = await intel.IpInfoService.LookupAsync(ip.RawIp, cancellationToken);
+            if (intel.ThreatIntelService.HasAbuseIpDbKey)
             {
-                ip.AbuseIpDb = await threatIntelService.LookupAbuseIpDbAsync(ip.RawIp, cancellationToken);
+                ip.AbuseIpDb = await intel.ThreatIntelService.LookupAbuseIpDbAsync(ip.RawIp, cancellationToken);
             }
         }
 
-        // Enrich attachments and URLs via VirusTotal (rate-limited at 4 req/min)
-        if (threatIntelService.HasVirusTotalKey)
+        if (intel.ThreatIntelService.HasVirusTotalKey)
         {
             int vtQueries = report.Attachments.Count + report.NetworkIocs.Urls.Count;
-            if (vtQueries > 0)
+            if (verboseProgress && vtQueries > 0)
             {
-                WriteColoredLine($"[*] Querying VirusTotal v3 for {report.Attachments.Count} attachment(s) and {report.NetworkIocs.Urls.Count} URL(s)...", ConsoleColor.DarkCyan);
+                WriteColoredLine(
+                    $"[*] Querying VirusTotal v3 for {report.Attachments.Count} attachment(s) and {report.NetworkIocs.Urls.Count} URL(s)...",
+                    ConsoleColor.DarkCyan);
             }
 
             foreach (AttachmentInfo attachment in report.Attachments)
             {
-                attachment.VirusTotal = await threatIntelService.LookupFileHashAsync(
+                attachment.VirusTotal = await intel.ThreatIntelService.LookupFileHashAsync(
                     attachment.Sha256,
                     msg => WriteColoredLine($"    {msg}", ConsoleColor.DarkYellow),
                     cancellationToken);
@@ -193,14 +432,12 @@ public static class Program
 
             foreach (ExtractedUrl url in report.NetworkIocs.Urls)
             {
-                url.VirusTotal = await threatIntelService.LookupUrlAsync(
+                url.VirusTotal = await intel.ThreatIntelService.LookupUrlAsync(
                     url.RawUrl,
                     msg => WriteColoredLine($"    {msg}", ConsoleColor.DarkYellow),
                     cancellationToken);
             }
         }
-
-        return notices;
     }
 
     private static void BuildSecurityWarnings(ForensicReport report)
@@ -334,7 +571,8 @@ public static class Program
     }
 
     private static async Task<int> RunExportsAsync(
-        ForensicReport report,
+        IReadOnlyList<ForensicReport> reports,
+        bool isBatch,
         CliOptions options,
         CancellationToken cancellationToken)
     {
@@ -358,8 +596,16 @@ public static class Program
             try
             {
                 string fullPath = Path.GetFullPath(options.ExportJsonPath);
-                await exporter.ExportJsonAsync(report, fullPath, cancellationToken);
-                WriteColoredLine($"  [+] JSON report exported  : {fullPath}", ConsoleColor.Green);
+                if (isBatch)
+                {
+                    await exporter.ExportJsonAsync(reports, fullPath, cancellationToken);
+                    WriteColoredLine($"  [+] JSON batch exported   : {fullPath} ({reports.Count} report(s))", ConsoleColor.Green);
+                }
+                else
+                {
+                    await exporter.ExportJsonAsync(reports[0], fullPath, cancellationToken);
+                    WriteColoredLine($"  [+] JSON report exported  : {fullPath}", ConsoleColor.Green);
+                }
             }
             catch (Exception ex)
             {
@@ -373,8 +619,8 @@ public static class Program
             try
             {
                 string fullPath = Path.GetFullPath(options.ExportCsvPath);
-                await exporter.ExportCsvAsync(report, fullPath, cancellationToken);
-                WriteColoredLine($"  [+] CSV summary exported  : {fullPath}", ConsoleColor.Green);
+                await exporter.ExportCsvAsync(reports, fullPath, cancellationToken);
+                WriteColoredLine($"  [+] CSV summary exported  : {fullPath} ({reports.Count} row(s))", ConsoleColor.Green);
             }
             catch (Exception ex)
             {
@@ -388,7 +634,7 @@ public static class Program
             try
             {
                 string statusMsg = await exporter.ExportGoogleSheetAsync(
-                    report,
+                    reports,
                     options.ExportGSheetId,
                     options.GSheetRange,
                     options.GSheetWebhookUrl,
@@ -404,6 +650,127 @@ public static class Program
 
         Console.WriteLine();
         return exitCode;
+    }
+
+    private static void PrintBatchFileSummary(
+        int index,
+        int total,
+        string relativePath,
+        ForensicReport report)
+    {
+        int criticalCount = report.SecurityWarnings.Count(w => w.Severity == WarningSeverity.Critical);
+        int highCount = report.SecurityWarnings.Count(w => w.Severity == WarningSeverity.High);
+        string sender = string.IsNullOrWhiteSpace(report.Headers.From) ? "(missing)" : report.Headers.From;
+        string subject = string.IsNullOrWhiteSpace(report.Headers.Subject) ? "(empty)" : report.Headers.Subject;
+        AuthenticationSummary auth = report.Headers.Authentication;
+        string authSummary = $"{auth.SpfStatus.ToUpperInvariant()}/{auth.DkimStatus.ToUpperInvariant()}/{auth.DmarcStatus.ToUpperInvariant()}";
+        string hits = BuildThreatSummaryLabel(report);
+
+        ConsoleColor headerColor = criticalCount > 0 || hits != "None"
+            ? ConsoleColor.Red
+            : (highCount > 0 ? ConsoleColor.DarkYellow : ConsoleColor.Green);
+
+        WriteColoredLine($"[{index}/{total}] {relativePath}", headerColor);
+        Console.WriteLine($"  From     : {Truncate(sender, 90)}");
+        Console.WriteLine($"  Subject  : {Truncate(subject, 90)}");
+        Console.WriteLine($"  Auth     : SPF/DKIM/DMARC = {authSummary} | Crit/High Warnings = {criticalCount}/{highCount} | Hits = {hits}");
+    }
+
+    private static void RenderBatchSummaryTable(
+        string rootDir,
+        IReadOnlyList<ForensicReport> reports,
+        IReadOnlyList<(string FilePath, string Error)> failures)
+    {
+        PrintSectionHeader("BATCH TRIAGE SUMMARY");
+
+        if (reports.Count > 0)
+        {
+            var rows = new List<string[]>(reports.Count);
+            int filesWithCritHigh = 0;
+
+            foreach (ForensicReport report in reports)
+            {
+                int crit = report.SecurityWarnings.Count(w => w.Severity == WarningSeverity.Critical);
+                int high = report.SecurityWarnings.Count(w => w.Severity == WarningSeverity.High);
+                if (crit + high > 0)
+                {
+                    filesWithCritHigh++;
+                }
+
+                string filename = Path.GetRelativePath(rootDir, report.SourceFile);
+                string sender = string.IsNullOrWhiteSpace(report.Headers.FromAddress)
+                    ? (string.IsNullOrWhiteSpace(report.Headers.From) ? "(missing)" : report.Headers.From)
+                    : report.Headers.FromAddress;
+
+                AuthenticationSummary auth = report.Headers.Authentication;
+                string authStr = $"{auth.SpfStatus.ToUpperInvariant()}/{auth.DkimStatus.ToUpperInvariant()}/{auth.DmarcStatus.ToUpperInvariant()}";
+                string warnStr = $"{crit}C / {high}H";
+                string hitsStr = BuildThreatSummaryLabel(report);
+
+                rows.Add([
+                    Truncate(filename, 26),
+                    Truncate(sender, 28),
+                    Truncate(authStr, 17),
+                    Truncate(warnStr, 11),
+                    Truncate(hitsStr, 28)
+                ]);
+            }
+
+            PrintAsciiTable(
+                ["Filename", "From", "SPF/DKIM/DMARC", "Crit / High", "Spoofed / Malicious Hits"],
+                [26, 28, 17, 11, 28],
+                rows);
+
+            Console.WriteLine(
+                $"  Analyzed: {reports.Count} | Failed: {failures.Count} | Files with Critical/High warnings: {filesWithCritHigh}");
+        }
+        else
+        {
+            WriteColoredLine($"  Analyzed: 0 | Failed: {failures.Count}", ConsoleColor.Red);
+        }
+
+        if (failures.Count > 0)
+        {
+            Console.WriteLine();
+            WriteColoredLine("  Failed Files:", ConsoleColor.Red);
+            foreach ((string filePath, string error) in failures)
+            {
+                WriteColoredLine($"    - {filePath}: {error}", ConsoleColor.Red);
+            }
+        }
+
+        Console.WriteLine();
+    }
+
+    private static string BuildThreatSummaryLabel(ForensicReport report)
+    {
+        var flags = new List<string>();
+
+        int spoofedCount = report.Attachments.Count(a => a.IsExtensionSpoofed);
+        if (spoofedCount > 0)
+        {
+            flags.Add($"SpoofedAtt({spoofedCount})");
+        }
+
+        int vtFileHits = report.Attachments.Count(a => a.VirusTotal is { Found: true, Malicious: > 0 });
+        if (vtFileHits > 0)
+        {
+            flags.Add($"VT-File({vtFileHits})");
+        }
+
+        int vtUrlHits = report.NetworkIocs.Urls.Count(u => u.VirusTotal is { Found: true, Malicious: > 0 });
+        if (vtUrlHits > 0)
+        {
+            flags.Add($"VT-URL({vtUrlHits})");
+        }
+
+        int abuseIpHits = report.NetworkIocs.IpAddresses.Count(ip => ip.AbuseIpDb is { Error: null, AbuseConfidenceScore: >= 50 });
+        if (abuseIpHits > 0)
+        {
+            flags.Add($"AbuseIP({abuseIpHits})");
+        }
+
+        return flags.Count == 0 ? "None" : string.Join(", ", flags);
     }
 
     private static void RenderReport(ForensicReport report, List<string> intelNotices)
@@ -646,6 +1013,76 @@ public static class Program
                     options.ShowVersion = true;
                     return true;
 
+                case "--dir":
+                    if (!TryConsumeValue(args, ref i, arg, out string? dirPath, out error)) return false;
+                    options.DirPath = dirPath;
+                    break;
+
+                case "--fetch-imap":
+                    if (!TryConsumeValue(args, ref i, arg, out string? fetchDir, out error)) return false;
+                    options.FetchImapDir = fetchDir;
+                    break;
+
+                case "--imap-folder":
+                    if (!TryConsumeValue(args, ref i, arg, out string? folder, out error)) return false;
+                    options.ImapFolder = folder!;
+                    options.ImapFolderExplicit = true;
+                    break;
+
+                case "--imap-from":
+                    if (!TryConsumeValue(args, ref i, arg, out string? fromFilter, out error)) return false;
+                    options.ImapFrom = fromFilter;
+                    break;
+
+                case "--imap-subject":
+                    if (!TryConsumeValue(args, ref i, arg, out string? subjectFilter, out error)) return false;
+                    options.ImapSubject = subjectFilter;
+                    break;
+
+                case "--imap-since":
+                    if (!TryConsumeValue(args, ref i, arg, out string? sinceRaw, out error)) return false;
+                    if (!DateOnly.TryParseExact(sinceRaw, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly sinceDate))
+                    {
+                        error = $"Option '--imap-since' requires a valid date in YYYY-MM-DD format (got '{sinceRaw}').";
+                        return false;
+                    }
+                    options.ImapSince = sinceDate;
+                    break;
+
+                case "--imap-unseen":
+                    options.ImapUnseen = true;
+                    break;
+
+                case "--imap-limit":
+                    if (!TryConsumeValue(args, ref i, arg, out string? limitRaw, out error)) return false;
+                    if (!int.TryParse(limitRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int limit) || limit <= 0)
+                    {
+                        error = $"Option '--imap-limit' requires a positive integer (got '{limitRaw}').";
+                        return false;
+                    }
+                    options.ImapLimit = limit;
+                    options.ImapLimitExplicit = true;
+                    break;
+
+                case "--analyze":
+                    options.AnalyzeAfterFetch = true;
+                    break;
+
+                case "--dump-part":
+                    if (!TryConsumeValue(args, ref i, arg, out string? partRaw, out error)) return false;
+                    if (!int.TryParse(partRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int partIndex) || partIndex < 1)
+                    {
+                        error = $"Option '--dump-part' requires a positive 1-based attachment index (got '{partRaw}').";
+                        return false;
+                    }
+                    options.DumpPartIndex = partIndex;
+                    break;
+
+                case "--dump-dir":
+                    if (!TryConsumeValue(args, ref i, arg, out string? dumpDir, out error)) return false;
+                    options.DumpDir = dumpDir;
+                    break;
+
                 case "--no-intel":
                     options.NoIntel = true;
                     break;
@@ -697,6 +1134,42 @@ public static class Program
             }
         }
 
+        int modeCount = (options.EmlFilePath is not null ? 1 : 0) +
+                        (options.DirPath is not null ? 1 : 0) +
+                        (options.FetchImapDir is not null ? 1 : 0);
+
+        if (modeCount > 1)
+        {
+            error = "Specify only one input mode: <file.eml>, --dir <folder_path>, or --fetch-imap <output_dir>.";
+            return false;
+        }
+
+        bool anyImapOption = options.ImapFolderExplicit ||
+                             options.ImapFrom is not null ||
+                             options.ImapSubject is not null ||
+                             options.ImapSince.HasValue ||
+                             options.ImapUnseen ||
+                             options.ImapLimitExplicit ||
+                             options.AnalyzeAfterFetch;
+
+        if (anyImapOption && options.FetchImapDir is null)
+        {
+            error = "Options --imap-* and --analyze can only be used with --fetch-imap <output_dir>.";
+            return false;
+        }
+
+        if (options.DumpPartIndex.HasValue && options.EmlFilePath is null)
+        {
+            error = "Option --dump-part requires a single <file.eml> input.";
+            return false;
+        }
+
+        if (options.DumpDir is not null && !options.DumpPartIndex.HasValue)
+        {
+            error = "Option --dump-dir requires --dump-part <index>.";
+            return false;
+        }
+
         return true;
     }
 
@@ -719,30 +1192,49 @@ public static class Program
         return true;
     }
 
-    private static void PrintBanner()
+    private static void PrintHeader()
     {
-        WriteColoredLine("===================================================================================", ConsoleColor.DarkCyan);
-        WriteColoredLine($"  EmlDissect Static .eml forensics and IOC extraction", ConsoleColor.Cyan);
-        WriteColoredLine("===================================================================================", ConsoleColor.DarkCyan);
+        WriteColoredLine($"EmlDissect v{ToolVersion} - Static .eml forensics, IOC extraction, and IMAP triage", ConsoleColor.Cyan);
     }
 
     private static void PrintUsage()
     {
         Console.WriteLine("Usage:");
         Console.WriteLine("  emldissect <file.eml> [options]");
+        Console.WriteLine("  emldissect --dir <folder_path> [options]");
+        Console.WriteLine("  emldissect --fetch-imap <output_dir> [imap options] [analysis/export options]");
         Console.WriteLine();
-        Console.WriteLine("Options:");
+        Console.WriteLine("Input & Acquisition Options:");
+        Console.WriteLine("  --dir <folder_path>        Recursively analyze all *.eml files in a directory");
+        Console.WriteLine("  --fetch-imap <output_dir>  Fetch matching messages via IMAP as raw .eml files");
+        Console.WriteLine("  --imap-folder <name>       Target IMAP folder (default: INBOX)");
+        Console.WriteLine("  --imap-from <sender>       Filter IMAP messages by sender address or domain");
+        Console.WriteLine("  --imap-subject <keyword>   Filter IMAP messages by subject keyword");
+        Console.WriteLine("  --imap-since <YYYY-MM-DD>  Filter IMAP messages delivered on or after date");
+        Console.WriteLine("  --imap-unseen              Fetch only unread IMAP messages");
+        Console.WriteLine("  --imap-limit <number>      Maximum messages to download per run (default: 50)");
+        Console.WriteLine("  --analyze                  Run batch analysis on <output_dir> after IMAP fetch");
+        Console.WriteLine();
+        Console.WriteLine("Attachment Quarantine Options (single-file mode):");
+        Console.WriteLine("  --dump-part <index>        Safely extract 1-based attachment as .quarantine");
+        Console.WriteLine("  --dump-dir <folder_path>   Quarantine output directory (default: ./quarantine)");
+        Console.WriteLine();
+        Console.WriteLine("Analysis & Export Options:");
         Console.WriteLine("  --no-intel                 Offline mode (skip IPinfo, VirusTotal, and AbuseIPDB)");
         Console.WriteLine("  --include-private-ips      Include private/loopback IPv4 ranges (RFC1918, 127.0.0.0/8)");
-        Console.WriteLine("  --export-json <path>       Export full ForensicReport as indented JSON");
-        Console.WriteLine("  --export-csv <path>        Export flattened SIEM/Excel summary row as CSV");
-        Console.WriteLine("  --export-gsheet <sheetId>  Append flattened analysis row to a Google Sheet");
+        Console.WriteLine("  --export-json <path>       Export ForensicReport (or array in batch mode) as JSON");
+        Console.WriteLine("  --export-csv <path>        Export flattened summary row(s) as CSV");
+        Console.WriteLine("  --export-gsheet <sheetId>  Append flattened summary row(s) to a Google Sheet");
         Console.WriteLine("  --gsheet-range <range>     Target A1 range for Google Sheets (default: Sheet1!A:T)");
         Console.WriteLine("  --gsheet-webhook <url>     Optional Webhook URL instead of Service Account credentials");
         Console.WriteLine("  -h, --help                 Show this help message");
         Console.WriteLine("  -v, --version              Show tool version");
         Console.WriteLine();
         Console.WriteLine("Environment Variables:");
+        Console.WriteLine("  IMAP_HOST                      IMAP server hostname (e.g., imap.gmail.com)");
+        Console.WriteLine("  IMAP_PORT                      IMAP TCP port (default: 993)");
+        Console.WriteLine("  IMAP_USER                      IMAP login username / email address");
+        Console.WriteLine("  IMAP_PASS                      IMAP password or app-specific password");
         Console.WriteLine("  IPINFO_TOKEN                   Optional ipinfo.io API token");
         Console.WriteLine("  VT_API_KEY                     VirusTotal API v3 key (free tier: 4 req/min throttled)");
         Console.WriteLine("  ABUSEIPDB_API_KEY              AbuseIPDB API v2 key");
