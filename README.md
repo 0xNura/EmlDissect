@@ -5,8 +5,6 @@
 [![Domain](https://shields.io)]()
 [![License: MIT](https://shields.io)](https://opensource.org)
 
-*🇬🇧 English version below | 🇫🇷 Version française plus bas*
-
 ---
 
 ## 🇫🇷 Français
