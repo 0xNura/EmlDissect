@@ -5,6 +5,7 @@
 [![Domain](https://shields.io)]()
 [![License: GPL v3](https://shields.io)](https://gnu.org)
 
+
 ---
 
 ## 🇬🇧 English
@@ -27,7 +28,7 @@
 * **Multi-Format & Google Sheets Export:** Exports structured forensic reports to **JSON**, **CSV**, or appends findings directly into a centralized **Google Sheet** for SOC phishing campaign tracking.
 * **Offline Triage Mode (`--no-intel`):** Runs purely local static analysis without making any external API requests.
 
-### Prerequisites
+### Prerequisites (For Building from Source)
 * [.NET 8.0 SDK](https://microsoft.comdownload) or higher.
 * [MimeKit](https://github.com) `>= 4.15.1` (restored automatically via NuGet).
 * *(Optional)* Free API keys for **IPinfo**, **VirusTotal**, **AbuseIPDB**, and a **Google Service Account** JSON key for Google Sheets export.
@@ -35,7 +36,7 @@
 ### Installation & Build
 ```bash
 # Clone the repository
-git clone https://github.com<your-username>/EmlDissect.git
+git clone https://github.com
 cd EmlDissect
 
 # Restore dependencies and build in Release mode
@@ -44,7 +45,7 @@ dotnet build src/EmlDissect.csproj -c Release
 ```
 
 ### API Keys Configuration (Optional)
-Never hardcode API keys in the source code. Set them via environment variables before running the tool with Threat Intel enabled:
+Never hardcode API keys in the source code. Set them via environment variables in your terminal before running the tool with Threat Intel enabled:
 
 **Windows (PowerShell):**
 ```powershell
@@ -52,6 +53,14 @@ $env:IPINFO_TOKEN="your_ipinfo_token"
 $env:VT_API_KEY="your_virustotal_api_key"
 $env:ABUSEIPDB_API_KEY="your_abuseipdb_api_key"
 $env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\service-account.json"
+```
+
+**Windows (CMD):**
+```cmd
+set IPINFO_TOKEN=your_ipinfo_token
+set VT_API_KEY=your_virustotal_api_key
+set ABUSEIPDB_API_KEY=your_abuseipdb_api_key
+set GOOGLE_APPLICATION_CREDENTIALS=C:\path\to\service-account.json
 ```
 
 **Linux / macOS (Bash):**
@@ -68,20 +77,35 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 * **Gmail:** Open the email → Click the three dots (`⋮`) next to Reply → **Download message**.
 * **Outlook:** Open the email → Click (`...`) → **Download** (or drag and drop the email onto your Desktop).
 
-#### 2. Running Commands
-```bash
+#### 2. Option A: Using the Pre-compiled Release (Recommended for Windows)
+1. Download `EmlDissect-v2.0.0-win-x64.zip` from the [Releases](https://github.com) page and extract it.
+2. Double-click **`Start_CLI.bat`** to open a ready-to-use terminal in the tool's directory.
+3. Run `emldissect.exe` directly against any `.eml` file:
+
+```cmd
 # Test with the included phishing sample (Offline mode)
-dotnet run --project src/EmlDissect.csproj -- samples/phishing_test.eml --no-intel
+emldissect.exe phishing_test.eml --no-intel
 
 # Analyze a real email with IPinfo / Threat Intel enrichment
-dotnet run --project src/EmlDissect.csproj -- "C:\path\to\downloaded_email.eml"
+emldissect.exe "C:\path\to\downloaded_email.eml"
 
 # Export full forensic report to JSON or CSV
-dotnet run --project src/EmlDissect.csproj -- samples/phishing_test.eml --export-json report.json
-dotnet run --project src/EmlDissect.csproj -- samples/phishing_test.eml --export-csv report.csv
+emldissect.exe phishing_test.eml --export-json report.json
+emldissect.exe phishing_test.eml --export-csv report.csv
 
 # Append findings directly to a Google Sheet
-dotnet run --project src/EmlDissect.csproj -- samples/phishing_test.eml --export-gsheet <SPREADSHEET_ID>
+emldissect.exe phishing_test.eml --export-gsheet <SPREADSHEET_ID>
+```
+
+#### 3. Option B: Running from Source Code (Developers)
+If you cloned the repository instead of downloading the `.exe`, run commands from the root `EmlDissect/` folder using `dotnet run`:
+
+```bash
+# Offline test
+dotnet run --project src/EmlDissect.csproj -- samples/phishing_test.eml --no-intel
+
+# Online analysis with Threat Intel
+dotnet run --project src/EmlDissect.csproj -- "C:\path\to\downloaded_email.eml"
 ```
 
 ### Disclaimer
@@ -89,3 +113,5 @@ This tool is intended strictly for educational, defensive, and authorized forens
 
 ### License
 This project is licensed under the **GNU General Public License v3.0 (GPLv3)** — see the [LICENSE](LICENSE) file for details.
+
+---
