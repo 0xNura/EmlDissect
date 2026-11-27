@@ -1,55 +1,53 @@
-# EmlDissect 🔍
+# EmlDissect
 
-> 🟣 **.NET 8.0+** | 🟢 **C#** | 🔵 **DFIR / Blue Team** | ⚖️ **GNU GPLv3**
-
+> .NET 8.0+ | C# | DFIR / Blue Team | GNU GPLv3
 
 ---
 
-## 🇬🇧 English
+## Overview
 
-### Overview
-**EmlDissect** is an open-source, lightweight command-line forensic and Threat Intelligence tool written in C# (.NET 8.0+) for SOC analysts and DFIR (Digital Forensics and Incident Response) practitioners. It safely dissects suspicious `.eml` files purely in memory without writing or executing payloads on disk to extract headers, authentication checks, neutralized (defanged) network IOCs, attachment hashes, file signature anomalies, and automated Threat Intel enrichment.
+**EmlDissect** is a command-line static `.eml` parser and IOC extraction utility written in C# (.NET 8.0). It parses email files purely in memory without writing or executing attachments on disk, extracts routing headers and authentication checks, defangs network indicators, verifies attachment file signatures, and optionally enriches IOCs via Threat Intelligence APIs.
 
-### Features
+## Features
 
-#### Core Forensics
-* **Envelope & Header Analysis:** Extracts `From`, `To`, `Cc`, `Subject`, `Date`, `Message-ID`, `Return-Path`, `Reply-To`, `X-Originating-IP`, and `X-Mailer`. Automatically flags display-name impersonation and domain mismatches.
-* **Chronological Routing Hops:** Parses `Received` headers bottom-to-top to reconstruct the exact server path from origin to destination and calculates transit delays between hops.
-* **Authentication Checks:** Parses `Authentication-Results` headers for **SPF**, **DKIM**, and **DMARC** status (`PASS` / `FAIL`).
-* **Network IOC Extraction & Defanging:** Extracts public IPv4 addresses, unique domains, and URLs from both plain-text and HTML bodies. Detects `<a href>` vs anchor-text mismatches (`MISMATCH!`) and outputs all indicators in safe **defanged** format (`http://evil.com` → `hxxp://evil[.]com`).
-* **In-Memory Attachment Forensics:** Lists attachments (MIME type, size), computes **MD5**, **SHA-1**, and **SHA-256** cryptographic hashes in memory, and inspects **Magic Bytes** to detect extension spoofing (e.g., a Windows PE executable `4D 5A` disguised as `.pdf`).
-* **IP Geolocation & ASN Lookup (IPinfo.io):** Queries `ipinfo.io` to identify the City, Region, Country, ASN, and ISP/Hosting provider for every public IPv4 extracted.
+### Static Forensics
+- **Headers & Routing:** Extracts `From`, `To`, `Cc`, `Subject`, `Date`, `Message-ID`, `Return-Path`, `Reply-To`, `X-Originating-IP`, and `X-Mailer`. Reconstructs chronological `Received` hops with transit delays and flags display-name or domain mismatches.
+- **Authentication:** Parses `Authentication-Results` and `Received-SPF` headers for **SPF**, **DKIM**, and **DMARC** status (`PASS` / `FAIL`).
+- **Network IOCs & Defanging:** Extracts public IPv4 addresses, domains, and URLs from plain-text and HTML bodies. Flags `<a href>` vs anchor-text discrepancies (`MISMATCH!`) and prints indicators in defanged format (`http://evil.com` -> `hxxp://evil[.]com`).
+- **In-Memory Attachment Inspection:** Lists attachments (declared MIME type, size), computes **MD5**, **SHA-1**, and **SHA-256** hashes in memory, and checks leading **magic bytes** against declared extensions to detect extension spoofing (e.g., an `MZ` executable disguised as `.pdf`).
 
-#### Threat Intelligence & Reporting
-* **VirusTotal & AbuseIPDB Enrichment:** Queries **VirusTotal API v3** (for attachment SHA-256 hashes and URLs) and **AbuseIPDB API v2** (for IPv4 abuse confidence scores).
-* **Multi-Format & Google Sheets Export:** Exports structured forensic reports to **JSON**, **CSV**, or appends findings directly into a centralized **Google Sheet** for SOC phishing campaign tracking.
-* **Offline Triage Mode (`--no-intel`):** Runs purely local static analysis without making any external API requests.
+### Threat Intelligence & Exports
+- **IPinfo.io Lookup:** Resolves City, Region, Country, ASN, and ISP/Hosting provider for extracted public IPv4 addresses.
+- **VirusTotal & AbuseIPDB:** Optional enrichment via **VirusTotal API v3** (attachment SHA-256 hashes and URLs) and **AbuseIPDB API v2** (IPv4 abuse confidence score).
+- **Offline Mode (`--no-intel`):** Runs purely local static analysis with zero external network requests.
+- **Exports:** Saves reports to **JSON** (`--export-json`), **CSV** (`--export-csv`), or appends rows directly to a **Google Sheet** (`--export-gsheet`).
 
-### Prerequisites (For Building from Source)
-* [.NET 8.0 SDK](https://microsoft.comdownload) or higher.
-* [MimeKit](https://github.com) `>= 4.15.1` (restored automatically via NuGet).
-* *(Optional)* Free API keys for **IPinfo**, **VirusTotal**, **AbuseIPDB**, and a **Google Service Account** JSON key for Google Sheets export.
+## Prerequisites (Building from Source)
 
-### Installation & Build
+- [.NET 8.0 SDK](https://microsoft.com) or higher.
+- [MimeKit](https://github.com) `>= 4.15.1` (restored automatically via NuGet).
+- *(Optional)* API keys for **IPinfo**, **VirusTotal**, **AbuseIPDB**, and a **Google Service Account** JSON key for Google Sheets export.
+
+## Installation & Build
+
 ```bash
-# Clone the repository
 git clone https://github.com/0xNura/EmlDissect.git
 cd EmlDissect
 
-# Restore dependencies and build in Release mode
 dotnet restore src/EmlDissect.csproj
 dotnet build src/EmlDissect.csproj -c Release
 ```
 
-### API Keys Configuration (Optional)
-Never hardcode API keys in the source code. Set them via environment variables in your terminal before running the tool with Threat Intel enabled:
+## API Keys Configuration (Optional)
+
+API keys are read from environment variables. Set them in your shell before running online lookups:
 
 **Windows (PowerShell):**
 ```powershell
-$env:IPINFO_TOKEN="your_ipinfo_token"
-$env:VT_API_KEY="your_virustotal_api_key"
-$env:ABUSEIPDB_API_KEY="your_abuseipdb_api_key"
-$env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\service-account.json"
+\$env:IPINFO_TOKEN="your_ipinfo_token"
+\$env:VT_API_KEY="your_virustotal_api_key"
+\$env:ABUSEIPDB_API_KEY="your_abuseipdb_api_key"
+\$env:GOOGLE_APPLICATION_CREDENTIALS="C:\(\path\to\service-\)account.json"
 ```
 
 **Windows (CMD):**
@@ -57,7 +55,7 @@ $env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\service-account.json"
 set IPINFO_TOKEN=your_ipinfo_token
 set VT_API_KEY=your_virustotal_api_key
 set ABUSEIPDB_API_KEY=your_abuseipdb_api_key
-set GOOGLE_APPLICATION_CREDENTIALS=C:\path\to\service-account.json
+set GOOGLE_APPLICATION_CREDENTIALS=C:\(\path\to\service-\)account.json
 ```
 
 **Linux / macOS (Bash):**
@@ -68,47 +66,46 @@ export ABUSEIPDB_API_KEY="your_abuseipdb_api_key"
 export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 ```
 
-### How to Use & Quickstart
+## Usage
 
-#### 1. Obtaining an `.eml` File
-* **Gmail:** Open the email → Click the three dots (`⋮`) next to Reply → **Download message**.
-* **Outlook:** Open the email → Click (`...`) → **Download** (or drag and drop the email onto your Desktop).
+### 1. Exporting an `.eml` File
+- **Gmail:** Open the message -> click the three dots (`⋮`) next to Reply -> **Download message**.
+- **Outlook:** Open the message -> click (`...`) -> **Download** (or drag and drop the message onto your Desktop).
 
-#### 2. Option A: Using the Pre-compiled Release (Recommended for Windows)
+### 2. Option A: Pre-compiled Windows Binary (Release)
 1. Download `EmlDissect-win-x64.zip` from the [Releases](https://github.com/0xNura/EmlDissect/releases) page and extract it.
-2. Double-click **`Start_CLI.bat`** to open a ready-to-use terminal in the tool's directory.
-3. Run `emldissect.exe` directly against any `.eml` file:
+2. Double-click **`Start_CLI.bat`** to open a terminal in the extracted folder.
+3. Run `emldissect.exe`:
 
 ```cmd
-# Test with the included phishing sample (Offline mode)
+# Offline analysis on the included sample
 emldissect.exe samples\phishing_test.eml --no-intel
 
-# Analyze a real email with IPinfo / Threat Intel enrichment
-emldissect.exe "C:\path\to\downloaded_email.eml"
+# Online analysis with IPinfo / Threat Intel enrichment
+emldissect.exe "%USERPROFILE%\Downloads\email.eml"
 
-# Export full forensic report to JSON or CSV
+# Export to JSON or CSV
 emldissect.exe samples\phishing_test.eml --export-json report.json
 emldissect.exe samples\phishing_test.eml --export-csv report.csv
 
-# Append findings directly to a Google Sheet
+# Append results to a Google Sheet
 emldissect.exe samples\phishing_test.eml --export-gsheet <SPREADSHEET_ID>
 ```
 
-#### 3. Option B: Running from Source Code (Developers)
-If you cloned the repository instead of downloading the `.exe`, run commands from the root `EmlDissect/` folder using `dotnet run`:
+### 3. Option B: Running from Source
 
 ```bash
-# Offline test
+# Offline analysis
 dotnet run --project src/EmlDissect.csproj -- samples/phishing_test.eml --no-intel
 
-# Online analysis with Threat Intel
-dotnet run --project src/EmlDissect.csproj -- "C:\path\to\downloaded_email.eml"
+# Online analysis with Threat Intel enrichment
+dotnet run --project src/EmlDissect.csproj -- "%USERPROFILE%/Downloads/email.eml"
 ```
 
-### Disclaimer
-This tool is intended strictly for educational, defensive, and authorized forensic analysis purposes. Always handle suspicious email samples inside an isolated sandbox environment.
+## Disclaimer
 
-### License
-This project is licensed under the **GNU General Public License v3.0 (GPLv3)** — see the [LICENSE](LICENSE) file for details.
+For educational, defensive, and authorized forensic analysis only. Always inspect suspicious `.eml` files and attachments inside an isolated sandbox environment.
 
----
+## License
+
+Licensed under the **GNU General Public License v3.0 (GPLv3)**. See [LICENSE](LICENSE) for details.
